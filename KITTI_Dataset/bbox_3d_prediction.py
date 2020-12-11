@@ -5,6 +5,7 @@ import time
 from PIL import Image
 import argparse
 import math
+import json
 
 import torch
 from torch.autograd import Variable
@@ -12,6 +13,8 @@ import torchvision.transforms as tfs
 
 from model import Net
 
+
+JSONFILE = {'2D': {}, '3D': {}}
 
 def get_2d_bbox(filename):
     """
@@ -27,6 +30,7 @@ def get_2d_bbox(filename):
         cmds = 'cd C:/Users/wangt/Documents/darknet/build/darknet/x64/ && ' \
                'darknet.exe detector demo bdd/obj.data bdd/bdd.cfg bdd/bdd.weights ' \
                '-dont_show -ext_output ' + filename
+        
         res = os.popen(cmds)
         data = res.readlines()
         frames = []
@@ -55,7 +59,7 @@ def get_2d_bbox(filename):
         print('Please check again the filename')
         exit(0)
 
-    with open('result.txt', 'w') as f:
+    with open('%s_result.txt' % os.path.splitext(os.path.basename(filename))[0], 'w') as f:
         for block in frames:
             f.writelines(block)
     return frames, filetype
@@ -70,6 +74,10 @@ def read_labels(index, frames, thresh_2d):
     :return: vehicle bbox = labels_for_3d, for further 3d bbox generation, other bbox = labels_2d
     """
     frame = frames[index]
+    JSONFILE['2D'][index] = {}
+    JSONFILE['2D'][index]['vehicle'] = []
+    JSONFILE['2D'][index]['cycle'] = []
+    JSONFILE['2D'][index]['human'] = []
     # the confidence was save as a integer, 30% -> 30, so thresh_2d * 100
     thresh_2d *= 100
     labels_for_3d = []
@@ -77,32 +85,45 @@ def read_labels(index, frames, thresh_2d):
     for line in frame:
         label = np.zeros((5,), dtype='int')
         if 'vehicle' in line:
+        # sometimes there's some wrong detection with two categories in one line
+            if ',' in line:
+                line = line.split(',')[1]
             line = line.split()
             label[0] = int(line[3])
             label[1] = int(line[5])
             label[2] = int(line[7])
             label[3] = int(line[9][:-1])
             label[4] = int(line[1][:-1])
+            JSONFILE['2D'][index]['vehicle'].append(label.tolist())
             if label[4] > thresh_2d:
                 labels_for_3d.append(label)
         elif 'cycle' in line:
+            # sometimes there's some wrong detection with two categories in one line
+            if ',' in line:
+                line = line.split(',')[1]
             line = line.split()
             label[0] = int(line[3])
             label[1] = int(line[5])
             label[2] = int(line[7])
             label[3] = int(line[9][:-1])
             label[4] = int(line[1][:-1])
+            JSONFILE['2D'][index]['cycle'].append(label.tolist())
             if label[4] > thresh_2d:
                 labels_2d.append(label)
         elif 'human' in line:
+            # sometimes there's some wrong detection with two categories in one line
+            if ',' in line:
+                line = line.split(',')[1]
             line = line.split()
             label[0] = int(line[3])
             label[1] = int(line[5])
             label[2] = int(line[7])
             label[3] = int(line[9][:-1])
             label[4] = int(line[1][:-1])
+            JSONFILE['2D'][index]['human'].append(label.tolist())
             if label[4] > thresh_2d:
                 labels_2d.append(label)
+   
     return labels_for_3d, labels_2d
 
 
@@ -207,13 +228,14 @@ def decode_3d_bbox(labels_for_3d, labels_3d):
     return decoded_bboxes
 
 
-def decode_coordinate(decoded_bboxes):
+def decode_coordinate(decoded_bboxes, index):
     """
     get the coordinate of the parallelogram of the front and back face
     :param decoded_bboxes: the transformed prediction in original picture coordinate
     :return: the coordinate of the parallelogram of the front and back face
     """
     decoded_coors = []
+    JSONFILE['3D'][index] = []
     for decoded_bbox in decoded_bboxes:
         mid_f_1_x = decoded_bbox[0] - decoded_bbox[3] / 2.
         mid_f_2_x = decoded_bbox[0] + decoded_bbox[3] / 2.
@@ -244,6 +266,8 @@ def decode_coordinate(decoded_bboxes):
             int).reshape(
             (2, 8))
         decoded_coors.append(decoded_coor)
+
+        JSONFILE['3D'][index].append(decoded_coor.tolist())
     return decoded_coors
 
 
@@ -332,7 +356,7 @@ def get_drawed_picture(index, ori_img, frames, model, thresh_2d, thresh_3d, size
         # calculate the 3d bbox in original picture coordinate
         decoded_bboxes = decode_3d_bbox(labels_for_3d, labels_3d)
 
-        decoded_coors = decode_coordinate(decoded_bboxes)
+        decoded_coors = decode_coordinate(decoded_bboxes, index)
 
         # output the picture with labels
         draw = ori_img.copy()
@@ -344,7 +368,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--model_path', type=str, default='checkpoints/kitti.pth',
                         help='path of the model weight')
-    parser.add_argument('--thresh_2d', type=float, default=0.5, help='threshold of 2d bbox')
+    parser.add_argument('--thresh_2d', type=float, default=0.7, help='threshold of 2d bbox')
     parser.add_argument('--thresh_3d', type=float, default=0.5, help='threshold of 3d bbox')
     parser.add_argument('--size_for_detection', type=float, default=30,
                         help='the min size to generate 3d bbox, affect the distance of 3d bbox detection')
@@ -365,6 +389,7 @@ def main():
 
     frames, filetype = get_2d_bbox(filename)
     print('get 2d bboxes complete, %s Seconds\n' % (time.time() - start_time))
+
     tmp_time = time.time()
     print('loading the model........\n')
     model = load_model(model_path)
@@ -404,6 +429,9 @@ def main():
         print('total running time: %s Seconds\n' % (time.time() - start_time))
         video.release()
         out.release()
+    
+    with open(os.path.splitext(filename)[0] + '.json', 'w', encoding='utf-8') as f:
+        json.dump(JSONFILE, f)
 
 
 if __name__ == '__main__':
